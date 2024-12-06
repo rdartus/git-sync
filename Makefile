@@ -16,13 +16,13 @@
 BIN := git-sync
 
 # Where to push the docker image.
-REGISTRY ?= gcr.io/k8s-staging-git-sync
+REGISTRY ?= ghcr.io/rdartus
 
 # This version-strategy uses git tags to set the version string
-VERSION ?= $(shell git describe --tags --always --dirty)
+# VERSION ?= $(shell git describe --tags --always --dirty)
 #
 # This version-strategy uses a manual value to set the version string
-#VERSION ?= 1.2.3
+VERSION ?= 4.2.1
 
 # Set these to cross-compile.
 GOOS ?=
@@ -39,7 +39,7 @@ HTTPS_PROXY ?=
 ### These variables should not need tweaking.
 ###
 
-ALL_PLATFORMS := linux/amd64 linux/arm linux/arm64 linux/ppc64le linux/s390x
+ALL_PLATFORMS := linux/arm64 linux/amd64 linux/arm 
 
 # Used internally.  Users should pass GOOS and/or GOARCH.
 OS := $(if $(GOOS),$(GOOS),$(shell go env GOOS))

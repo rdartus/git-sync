@@ -47,17 +47,21 @@ FROM {ARG_FROM} as base
 # which will force a rebuild from here (by invalidating docker's cache).
 ARG FORCE_REBUILD=0
 
+ENV DBG 1
+# RUN echo 'debconf debconf/frontend select Dialog' | debconf-set-selections
+
 RUN apt-get -y -qq -o Dpkg::Use-Pty=0 update
 RUN apt-get -y -qq -o Dpkg::Use-Pty=0 -y upgrade
 
-RUN apt-get -y -qq -o Dpkg::Use-Pty=0 install --no-install-recommends bash # for the staging scripts and ldd
+RUN apt-get -y -qq -o Dpkg::Use-Pty=0 install --no-install-recommends bash git-lfs  # for the staging scripts and ldd
+# RUN apt-get -y -qq -o Dpkg::Use-Pty=0 install --no-install-recommends bash # for the staging scripts and ldd
 RUN mkdir -p {ARG_STAGING}
 COPY stage_binaries.sh /
 RUN /stage_binaries.sh -o {ARG_STAGING} \
-	-p base-files \
-	-p bash \
-	-p coreutils \
+    -p base-files \
 	-p git \
+    -p bash \
+    -p coreutils \
 	-p openssh-client \
 	-p ca-certificates \
 	-p curl \
@@ -69,6 +73,8 @@ RUN /stage_binaries.sh -o {ARG_STAGING} \
 	-f /etc/nsswitch.conf \
 	-f /etc/os-release \
 	-f /etc/passwd \
+	-f /etc/passwd \
+	-f /bin/git-lfs \
 	-f /tmp
 RUN ln -s /bin/bash {ARG_STAGING}/bin/sh # Not sure why this is not set up automatically
 
@@ -146,6 +152,7 @@ USER 65533:65533
 # files like ~/.gitconfig.
 ENV HOME=/tmp
 WORKDIR /tmp
+RUN git-lfs install
 
 # Default values for flags.
 # Git-sync itself does not default the `--root` ($GITSYNC_ROOT) flag, but we

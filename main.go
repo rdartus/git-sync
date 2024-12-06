@@ -130,6 +130,7 @@ type repoSync struct {
 	run            cmd.Runner
 	staleTimeout   time.Duration // time for worktrees to be cleaned up
 	appTokenExpiry time.Time     // time when github app auth token expires
+	gitlfs         bool          // time when github app auth token expires
 }
 
 func main() {
@@ -302,6 +303,10 @@ func main() {
 	flHTTPprof := pflag.Bool("http-pprof",
 		envBool(false, "GITSYNC_HTTP_PPROF", "GIT_SYNC_HTTP_PPROF"),
 		"enable the pprof debug endpoints on git-sync's HTTP endpoint")
+
+	flGitLFS := pflag.Bool("git-LFS",
+		envBool(false, "GITSYNC_GITLFS", "GIT_SYNC_GITLFS"),
+		"enable Git LFS pull")
 
 	// Obsolete flags, kept for compat.
 	flDeprecatedBranch := pflag.String("branch", envString("", "GIT_SYNC_BRANCH"),
@@ -717,6 +722,7 @@ func main() {
 		log:          log,
 		run:          cmdRunner,
 		staleTimeout: *flStaleWorktreeTimeout,
+		gitlfs:       *flGitLFS,
 	}
 
 	// This context is used only for git credentials initialization. There are
@@ -1594,6 +1600,16 @@ func (git *repoSync) configureWorktree(ctx context.Context, worktree worktree) e
 		if git.submodules == submodulesRecursive {
 			submodulesArgs = append(submodulesArgs, "--recursive")
 		}
+		if git.depth != 0 {
+			submodulesArgs = append(submodulesArgs, "--depth", strconv.Itoa(git.depth))
+		}
+		if _, _, err := git.Run(ctx, worktree.Path(), submodulesArgs...); err != nil {
+			return err
+		}
+	}
+	if git.gitlfs {
+		git.log.V(1).Info("updating LFS")
+		submodulesArgs := []string{"lfs", "pull"}
 		if git.depth != 0 {
 			submodulesArgs = append(submodulesArgs, "--depth", strconv.Itoa(git.depth))
 		}

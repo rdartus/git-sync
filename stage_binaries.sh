@@ -262,7 +262,11 @@ function stage_one_package() {
                         local dir
                         dir="$(dirname "${file}")"
                         ensure_dir_in_staging "${staging}" "$(dirname "${file}")"
-                        ln -s "${names[$i]}" "${staging}/${file}"
+                        if [[ -e "${staging}/${file}" ]]; then
+                            echo "Debug: ${staging}/${file} already exists."
+                        else
+                            ln -s "${names[$i]}" "${staging}/${file}"
+                        fi
                         found="true"
                         break
                     fi
@@ -275,6 +279,7 @@ function stage_one_package() {
                 indent stage_file_and_deps "${staging}" "${file}"
             fi
         fi
+
     done < <( dpkg -L "${pkg}" \
         | grep_allow_nomatch -vE '(/\.|/usr/share/(man|doc|.*-completion))' )
 }
@@ -345,6 +350,9 @@ function binary_to_libraries() {
         `# we want only the path remaining, not the (0x${LOCATION})` \
         | awk '{print $1}'
 }
+
+
+
 
 function stage_one_binary() {
     local staging="$1"
