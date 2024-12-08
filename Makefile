@@ -39,7 +39,7 @@ HTTPS_PROXY ?=
 ### These variables should not need tweaking.
 ###
 
-ALL_PLATFORMS := linux/arm64 linux/amd64 linux/arm 
+ALL_PLATFORMS := linux/amd64 
 
 # Used internally.  Users should pass GOOS and/or GOARCH.
 OS := $(if $(GOOS),$(GOOS),$(shell go env GOOS))
@@ -111,37 +111,11 @@ BUILD_DIRS :=             \
 # The following structure defeats Go's (intentional) behavior to always touch
 # result files, even if they have not changed.  This will still run `go` but
 # will not trigger further work if nothing has actually changed.
-OUTBIN = bin/$(OS)_$(ARCH)/$(BIN)
-$(OUTBIN): .go/$(OUTBIN).stamp
-	true
+# OUTBIN = bin/$(OS)_$(ARCH)/$(BIN)
+# $(OUTBIN): .go/$(OUTBIN).stamp
+# 	true
 
 # This will build the binary under ./.go and update the real binary iff needed.
-.PHONY: .go/$(OUTBIN).stamp
-.go/$(OUTBIN).stamp: $(BUILD_DIRS)
-	echo "making $(OUTBIN)"
-	docker run                                                 \
-	    -i                                                     \
-	    --rm                                                   \
-	    -u $$(id -u):$$(id -g)                                 \
-	    -v $$(pwd):/src                                        \
-	    -w /src                                                \
-	    -v $$(pwd)/.go/bin/$(OS)_$(ARCH):/go/bin               \
-	    -v $$(pwd)/.go/bin/$(OS)_$(ARCH):/go/bin/$(OS)_$(ARCH) \
-	    -v $$(pwd)/.go/cache:/.cache                           \
-	    --env HTTP_PROXY=$(HTTP_PROXY)                         \
-	    --env HTTPS_PROXY=$(HTTPS_PROXY)                       \
-	    $(BUILD_IMAGE)                                         \
-	    /bin/sh -c "                                           \
-	        ARCH=$(ARCH)                                       \
-	        OS=$(OS)                                           \
-	        VERSION=$(VERSION)                                 \
-	        BUILD_DEBUG=$(DBG)                                 \
-	        ./build/build.sh                                   \
-	    "
-	if ! cmp -s .go/$(OUTBIN) $(OUTBIN); then  \
-	    mv .go/$(OUTBIN) $(OUTBIN);            \
-	    date >$@;                              \
-	fi
 
 # Used to track state in hidden files.
 DOTFILE_IMAGE = $(subst /,_,$(IMAGE))-$(OS_ARCH_TAG)
@@ -162,34 +136,18 @@ $(LICENSES):
 ALLOW_STALE_APT ?=
 
 container: .container-$(DOTFILE_IMAGE) container-name
-.container-$(DOTFILE_IMAGE): bin/$(OS)_$(ARCH)/$(BIN) $(LICENSES) Dockerfile.in .buildx-initialized
+.container-$(DOTFILE_IMAGE): 
 	sed                                  \
 	    -e 's|{ARG_BIN}|$(BIN)|g'        \
 	    -e 's|{ARG_ARCH}|$(ARCH)|g'      \
 	    -e 's|{ARG_OS}|$(OS)|g'          \
 	    -e 's|{ARG_FROM}|$(BASEIMAGE)|g' \
+	    -e 's|{ARG_BUILDER}|$(BUILD_IMAGE)|g' \
+	    -e 's|{ARG_DBG}|$(DBG)|g' \
+	    -e 's|{ARG_VERSION}|$(VERSION)|g' \
 	    -e 's|{ARG_STAGING}|/staging|g' \
-	    Dockerfile.in > .dockerfile-$(OS)_$(ARCH)
-	HASH_LICENSES=$$(find $(LICENSES) -type f                    \
-	    | xargs md5sum | md5sum | cut -f1 -d' ');                \
-	HASH_BINARY=$$(md5sum bin/$(OS)_$(ARCH)/$(BIN)               \
-	    | cut -f1 -d' ');                                        \
-	FORCE=0;                                                     \
-	if [ -z "$(ALLOW_STALE_APT)" ]; then FORCE=$$(date +%s); fi; \
-	docker buildx build                                          \
-	    --builder git-sync                                       \
-	    --build-arg FORCE_REBUILD="$$FORCE"                      \
-	    --build-arg HASH_LICENSES="$$HASH_LICENSES"              \
-	    --build-arg HASH_BINARY="$$HASH_BINARY"                  \
-	    --progress=plain                                         \
-	    --load                                                   \
-	    --platform "$(OS)/$(ARCH)"                               \
-	    --build-arg HTTP_PROXY=$(HTTP_PROXY)                     \
-	    --build-arg HTTPS_PROXY=$(HTTPS_PROXY)                   \
-	    -t $(IMAGE):$(OS_ARCH_TAG)                               \
-	    -f .dockerfile-$(OS)_$(ARCH)                             \
-	    .
-	docker images -q $(IMAGE):$(OS_ARCH_TAG) > $@
+	    Dockerfile.in > Dockerfile
+	docker buildx bake
 
 container-name:
 	echo "container: $(IMAGE):$(OS_ARCH_TAG)"
@@ -214,8 +172,6 @@ manifest-list: all-push
 	  popd >/dev/null
 	platforms=$$(echo $(ALL_PLATFORMS) | sed 's/ /,/g');  \
 	./bin/tools/manifest-tool                             \
-	    --username=oauth2accesstoken                      \
-	    --password=$$(gcloud auth print-access-token)     \
 	    push from-args                                    \
 	    --platforms "$$platforms"                         \
 	    --template $(REGISTRY)/$(BIN):$(TAG)__OS_ARCH \

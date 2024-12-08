@@ -41,6 +41,26 @@
 #############################################################################
 # First we prepare the image that we want, regardless of build layers.
 #############################################################################
+FROM --platform=${BUILDPLATFORM:-linux/amd64} {ARG_BUILDER} as builder
+COPY . /src
+WORKDIR /src
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG GOOS=${TARGETOS} 
+ARG GOARCH=${TARGETARCH}
+
+
+RUN /bin/sh -c "  \
+VERSION={ARG_VERSION}                              \
+BUILD_DEBUG={ARG_DBG}                               \
+./build/build.sh "
+
+RUN ls /go/bin 
+
+
 FROM {ARG_FROM} as base
 
 # When building, we can pass a unique value (e.g. `date +%s`) for this arg,
@@ -137,7 +157,7 @@ COPY .licenses/ /LICENSES/
 ARG HASH_BINARY=0
 
 # Add the platform-specific binary.
-COPY bin/{ARG_OS}_{ARG_ARCH}/{ARG_BIN} /{ARG_BIN}
+COPY --from=builder /go/bin/{ARG_BIN} /{ARG_BIN}
 
 #############################################################################
 # Now we make a "clean" final image.

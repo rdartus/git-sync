@@ -18,12 +18,12 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-if [ -z "${ARCH:-}" ]; then
-    echo "ARCH must be set"
+if [ -z "${GOARCH:-}" ]; then
+    echo "GOARCH must be set"
     exit 1
 fi
-if [ -z "${OS:-}" ]; then
-    echo "OS must be set"
+if [ -z "${GOOS:-}" ]; then
+    echo "GOOS must be set"
     exit 1
 fi
 if [ -z "${VERSION:-}" ]; then
@@ -32,8 +32,6 @@ if [ -z "${VERSION:-}" ]; then
 fi
 
 export CGO_ENABLED=0
-export GOARCH="${ARCH}"
-export GOOS="${OS}"
 
 if [[ "${BUILD_DEBUG:-0}" == 1 ]]; then
     # Debugging - disable optimizations and inlining
@@ -46,11 +44,12 @@ else
     gogcflags="all=-trimpath=$(pwd)"
     goldflags="-s -w"
 fi
+go build -o /go/bin/git-sync
 
-always_ldflags="-X $(go list -m)/pkg/version.VERSION=${VERSION}"
-go install                                                      \
-    -installsuffix "static"                                     \
-    -gcflags="${gogcflags}"                                     \
-    -asmflags="${goasmflags}"                                   \
-    -ldflags="${always_ldflags} ${goldflags}"                   \
-    ./...
+# always_ldflags="-X $(go list -m)/pkg/version.VERSION=${VERSION}"
+# go install                                                      \
+#     -installsuffix "static"                                     \
+#     -gcflags="${gogcflags}"                                     \
+#     -asmflags="${goasmflags}"                                   \
+#     -ldflags="${always_ldflags} ${goldflags}"                   \
+#     ./...
