@@ -1,0 +1,88 @@
+---
+# Builds the git-sync image from this fork and pushes it to ghcr.io/<owner>/git-sync.
+# FORK-ONLY: do not include this file in a PR to kubernetes/git-sync.
+#
+# It runs when you push to the "publish-image" branch (or by hand from the
+# Actions tab), reusing the project's own Makefile (make container push).
+name: publish-image
+
+'on':
+  push:
+    branches:
+      - publish-image
+  workflow_dispatch:
+
+env:
+  GOPROXY: https://proxy.golang.org
+  GOPATH: ${{ github.workspace }}/go
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners, so no qemu emulation is needed.
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Set up go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10'
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: git-sync
+
+      - name: Compute image coordinates
+        run: |
+          echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+          echo "VERSION=lfs-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push (${{ matrix.arch }})
+        working-directory: git-sync
+        run: |
+          make push REGISTRY="$REGISTRY" VERSION="$VERSION" GOOS=linux GOARCH=${{ matrix.arch }}
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute image coordinates
+        run: |
+          echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+          echo "VERSION=lfs-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # Combine the per-arch images into one multi-arch tag.  (The Makefile's own
+      # "manifest-list" target is hardwired to gcloud, so it can't be used here.)
+      # The source annotation links the package to this repo on ghcr.io.
+      - name: Create multi-arch tags
+        run: |
+          IMG="$REGISTRY/git-sync"
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            -t "$IMG:$VERSION" \
+            -t "$IMG:lfs" \
+            "$IMG:${VERSION}__linux_amd64" \
+            "$IMG:${VERSION}__linux_arm64"
+          echo "Pushed $IMG:$VERSION (also :lfs)" >> "$GITHUB_STEP_SUMMARY"
