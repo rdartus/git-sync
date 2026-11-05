@@ -26,12 +26,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native runners, so no qemu emulation is needed.
+          # Native runners: fast.
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
+          # No native runners exist for these, so they are built under qemu
+          # (the Makefile registers it).  Only the apt/staging steps are
+          # emulated, so expect these jobs to be much slower.
+          - arch: arm
+            runner: ubuntu-latest
+          - arch: ppc64le
+            runner: ubuntu-latest
+          - arch: s390x
+            runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
       - name: Set up go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -60,6 +70,8 @@ jobs:
 
   manifest:
     needs: build
+    # Run even if some architectures failed, and publish the ones that worked.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Compute image coordinates
@@ -79,10 +91,25 @@ jobs:
       - name: Create multi-arch tags
         run: |
           IMG="$REGISTRY/git-sync"
+          sources=()
+          for arch in amd64 arm arm64 ppc64le s390x; do
+            ref="$IMG:${VERSION}__linux_${arch}"
+            if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+              sources+=("$ref")
+            else
+              echo "::warning::no image for linux/${arch}, skipping it"
+            fi
+          done
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "::error::no per-architecture image was pushed"
+            exit 1
+          fi
           docker buildx imagetools create \
             --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             -t "$IMG:$VERSION" \
             -t "$IMG:lfs" \
-            "$IMG:${VERSION}__linux_amd64" \
-            "$IMG:${VERSION}__linux_arm64"
-          echo "Pushed $IMG:$VERSION (also :lfs)" >> "$GITHUB_STEP_SUMMARY"
+            "${sources[@]}"
+          {
+            echo "Pushed $IMG:$VERSION (also :lfs) for:"
+            printf -- '- %s\n' "${sources[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"
