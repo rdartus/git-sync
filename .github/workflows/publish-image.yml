@@ -1,9 +1,9 @@
----
+
 # Builds the git-sync image from this fork and pushes it to ghcr.io/<owner>/git-sync.
 # FORK-ONLY: do not include this file in a PR to kubernetes/git-sync.
 #
 # It runs when you push to the "publish-image" branch (or by hand from the
-# Actions tab), reusing the project's own Makefile (make container push).
+# Actions tab), reusing the project's own Makefile (make push).
 name: publish-image
 
 'on':
@@ -31,17 +31,18 @@ jobs:
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
-          # No native runners exist for these, so they are built under qemu
-          # (the Makefile registers it).  Only the apt/staging steps are
-          # emulated, so expect these jobs to be much slower.
+
+          # Built under QEMU.
           - arch: arm
             runner: ubuntu-latest
           - arch: ppc64le
             runner: ubuntu-latest
           - arch: s390x
             runner: ubuntu-latest
+
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+
     steps:
       - name: Set up go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -57,6 +58,39 @@ jobs:
           echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
           echo "VERSION=lfs-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
+
+      # Use a recent QEMU instead of the Makefile's legacy
+      # multiarch/qemu-user-static (QEMU 7.2).
+      - name: Set up QEMU (emulated architectures)
+        if: contains(fromJSON('["arm","ppc64le","s390x"]'), matrix.arch)
+        run: |
+          docker run --privileged --rm \
+            tonistiigi/binfmt:qemu-v10.2.3-68 \
+            --install "${{ matrix.arch }}"
+
+      # Verify that ppc64le emulation can execute ldd.
+      - name: Test ppc64le emulation
+        if: matrix.arch == 'ppc64le'
+        run: |
+          docker run --rm \
+            --platform linux/ppc64le \
+            debian:trixie \
+            sh -ec 'ldd /bin/ls'
+
+      # Initialize Buildx manually to prevent Makefile from
+      # registering its older QEMU implementation.
+      - name: Initialize Buildx (skip Makefile QEMU setup)
+        if: matrix.arch != 'amd64'
+        working-directory: git-sync
+        run: |
+          docker buildx create \
+            --name git-sync \
+            --node git-sync-0 >/dev/null
+
+          docker buildx inspect git-sync
+
+          touch .buildx-initialized
+
       - name: Log in to ghcr.io
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,9 +104,12 @@ jobs:
 
   manifest:
     needs: build
+
     # Run even if some architectures failed, and publish the ones that worked.
     if: ${{ !cancelled() }}
+
     runs-on: ubuntu-latest
+
     steps:
       - name: Compute image coordinates
         run: |
@@ -85,31 +122,34 @@ jobs:
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-      # Combine the per-arch images into one multi-arch tag.  (The Makefile's own
-      # "manifest-list" target is hardwired to gcloud, so it can't be used here.)
-      # The source annotation links the package to this repo on ghcr.io.
       - name: Create multi-arch tags
         run: |
           IMG="$REGISTRY/git-sync"
           sources=()
+
           for arch in amd64 arm arm64 ppc64le s390x; do
             ref="$IMG:${VERSION}__linux_${arch}"
+
             if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
               sources+=("$ref")
             else
               echo "::warning::no image for linux/${arch}, skipping it"
             fi
           done
+
           if [ "${#sources[@]}" -eq 0 ]; then
             echo "::error::no per-architecture image was pushed"
             exit 1
           fi
+
           docker buildx imagetools create \
             --annotation "index:org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             -t "$IMG:$VERSION" \
             -t "$IMG:lfs" \
+            -t "$IMG:latest" \
             "${sources[@]}"
+
           {
-            echo "Pushed $IMG:$VERSION (also :lfs) for:"
+            echo "Pushed $IMG:$VERSION (also :lfs and :latest) for:"
             printf -- '- %s\n' "${sources[@]}"
           } >> "$GITHUB_STEP_SUMMARY"
