@@ -393,10 +393,39 @@ function lfs_server_start() {
         >/dev/null
 }
 
-# Commit a git-lfs tracked file (big.bin) with the given content to $REPO.  The
-# first call also sets up LFS in the repo.  Unless $2 is "no-upload", upload
-# the LFS object to the server (there is no git server involved, only the LFS
-# server).  Note that the LFS server URL comes from .lfsconfig in the repo.
+# Set up $REPO for git-lfs, if it isn't already.  Note that the LFS server URL
+# comes from .lfsconfig in the repo.
+function lfs_repo_setup() {
+    if [[ ! -f "$REPO/.lfsconfig" ]]; then
+        git -C "$REPO" lfs install --local >/dev/null
+        git -C "$REPO" lfs track '*.bin' >/dev/null
+        printf '[lfs]\n\turl = "http://localhost:%s/"\n' "$LFS_PORT" > "$REPO/.lfsconfig"
+        git -C "$REPO" add .gitattributes .lfsconfig
+    fi
+}
+
+# Stage a git-lfs tracked file ($1, which must match *.bin) with the given
+# content ($2) in $REPO, without committing it.  Unless $3 is "no-upload",
+# upload the LFS object to the server (there is no git server involved, only
+# the LFS server).
+function lfs_add() {
+    local name="$1"
+    local content="$2"
+    local upload="${3:-upload}"
+
+    lfs_repo_setup
+    echo "$content" > "$REPO/$name"
+    git -C "$REPO" add "$name"
+    if [[ "$upload" == "upload" ]]; then
+        # The staged blob is the LFS pointer, which holds the object's ID.
+        local oid
+        oid=$(git -C "$REPO" show ":$name" | sed -n 's/^oid sha256://p')
+        git -C "$REPO" lfs push --object-id "http://localhost:$LFS_PORT/" "$oid" >/dev/null
+    fi
+}
+
+# Commit a git-lfs tracked file (big.bin) with the given content to $REPO, along
+# with anything already staged.  See lfs_add for the meaning of $2.
 #
 # The object is uploaded BEFORE the commit is created: a running git-sync polls
 # $REPO, and as soon as the commit exists it tries to download the object.
@@ -404,21 +433,38 @@ function lfs_commit() {
     local content="$1"
     local upload="${2:-upload}"
 
-    if [[ ! -f "$REPO/.lfsconfig" ]]; then
-        git -C "$REPO" lfs install --local >/dev/null
-        git -C "$REPO" lfs track '*.bin' >/dev/null
-        printf '[lfs]\n\turl = "http://localhost:%s/"\n' "$LFS_PORT" > "$REPO/.lfsconfig"
-        git -C "$REPO" add .gitattributes .lfsconfig
-    fi
-    echo "$content" > "$REPO/big.bin"
-    git -C "$REPO" add big.bin
-    if [[ "$upload" == "upload" ]]; then
-        # The staged blob is the LFS pointer, which holds the object's ID.
-        local oid
-        oid=$(git -C "$REPO" show :big.bin | sed -n 's/^oid sha256://p')
-        git -C "$REPO" lfs push --object-id "http://localhost:$LFS_PORT/" "$oid" >/dev/null
-    fi
+    lfs_add big.bin "$content" "$upload"
     git -C "$REPO" commit -qm "$content"
+}
+
+# List the LFS objects git-sync is holding on to anywhere under $ROOT/.git,
+# wherever git-lfs keeps them (one store for the whole repo, or one per
+# worktree).
+function lfs_objects() {
+    find "$ROOT/.git" -path '*/lfs/objects/*' -type f 2>/dev/null | sort || true
+}
+
+# Assert that there are exactly $1 LFS object files under $ROOT/.git.
+function assert_lfs_object_count() {
+    local want="$1"
+    local got
+    got=$(lfs_objects | wc -l | tr -d ' ')
+    if [[ "$got" != "$want" ]]; then
+        fail "expected $want LFS object(s) under $ROOT/.git, found $got:"$'\n'"$(lfs_objects)"
+    fi
+}
+
+# Assert that there are exactly $1 distinct LFS objects stored under
+# $ROOT/.git, counting hard links to the same file once.  This catches
+# objects that are stored more than once.
+function assert_lfs_distinct_object_count() {
+    local want="$1"
+    local got
+    got=$(find "$ROOT/.git" -path '*/lfs/objects/*' -type f -printf '%i\n' 2>/dev/null \
+            | sort -u | wc -l | tr -d ' ')
+    if [[ "$got" != "$want" ]]; then
+        fail "expected $want distinct LFS object(s) under $ROOT/.git, found $got:"$'\n'"$(lfs_objects)"
+    fi
 }
 
 function remove_containers() {
@@ -4093,6 +4139,97 @@ function e2e::git_lfs_missing_object() {
             --root="$ROOT" \
             --link="link"
     assert_file_absent "$ROOT/link/big.bin"
+}
+
+# LFS objects must not accumulate.  git-lfs never deletes objects by itself, so
+# once a worktree is removed (after --stale-worktree-timeout) the LFS objects
+# that only it needed must be gone too, just like its files.  While the old
+# worktree exists it must keep working.
+function e2e::git_lfs_cleanup() {
+    lfs_server_start
+    lfs_commit "${FUNCNAME[0]}-1"
+    local wt1
+    wt1=$(git -C "$REPO" rev-list -n1 HEAD)
+
+    GIT_SYNC \
+        --period=100ms \
+        --git-lfs \
+        --stale-worktree-timeout="3s" \
+        --repo="file://$REPO" \
+        --root="$ROOT" \
+        --link="link" \
+        &
+    wait_for_sync "${MAXWAIT}"
+    assert_link_exists "$ROOT/link"
+    assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}-1"
+    assert_lfs_object_count 1
+
+    lfs_commit "${FUNCNAME[0]}-2"
+    local wt2
+    wt2=$(git -C "$REPO" rev-list -n1 HEAD)
+    wait_for_sync "${MAXWAIT}"
+    # Both worktrees exist, each with its own (real) content.
+    assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}-2"
+    assert_file_eq "$ROOT/.worktrees/$wt1/big.bin" "${FUNCNAME[0]}-1"
+    assert_lfs_object_count 2
+
+    lfs_commit "${FUNCNAME[0]}-3"
+    wait_for_sync "${MAXWAIT}"
+    assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}-3"
+
+    # Wait for the stale worktrees to be removed.
+    sleep 5
+    assert_file_absent "$ROOT/.worktrees/$wt1/big.bin"
+    assert_file_absent "$ROOT/.worktrees/$wt2/big.bin"
+    assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}-3"
+    assert_lfs_object_count 1
+}
+
+# An LFS object that is the same in two consecutive commits must be stored (and
+# downloaded) only once, not once per worktree.
+function e2e::git_lfs_unchanged_objects_are_shared() {
+    lfs_server_start
+    lfs_add static.bin "${FUNCNAME[0]}-static"
+    lfs_commit "${FUNCNAME[0]}-1"
+
+    GIT_SYNC \
+        --period=100ms \
+        --git-lfs \
+        --stale-worktree-timeout="60s" \
+        --repo="file://$REPO" \
+        --root="$ROOT" \
+        --link="link" \
+        &
+    wait_for_sync "${MAXWAIT}"
+    assert_file_eq "$ROOT/link/static.bin" "${FUNCNAME[0]}-static"
+    assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}-1"
+    assert_lfs_distinct_object_count 2
+
+    lfs_commit "${FUNCNAME[0]}-2"
+    wait_for_sync "${MAXWAIT}"
+    assert_file_eq "$ROOT/link/static.bin" "${FUNCNAME[0]}-static"
+    assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}-2"
+    # static.bin once, plus one big.bin per commit.
+    assert_lfs_distinct_object_count 3
+}
+
+# Running git-sync again on an existing --root works and doesn't pile up
+# LFS objects.
+function e2e::git_lfs_restart() {
+    lfs_server_start
+    lfs_commit "${FUNCNAME[0]}"
+
+    for i in 1 2; do
+        GIT_SYNC \
+            --one-time \
+            --git-lfs \
+            --repo="file://$REPO" \
+            --root="$ROOT" \
+            --link="link"
+        assert_link_exists "$ROOT/link"
+        assert_file_eq "$ROOT/link/big.bin" "${FUNCNAME[0]}"
+        assert_lfs_object_count 1
+    done
 }
 
 #
