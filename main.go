@@ -1759,7 +1759,7 @@ func (git *repoSync) seedLFSObjects(ctx context.Context, worktree worktree, prev
 	}
 
 	linked := 0
-	for _, line := range strings.Split(stdout, "\n") {
+	for line := range strings.SplitSeq(stdout, "\n") {
 		// Lines look like "<oid> [*-] <path>", where the oid is a sha256.
 		oid, _, _ := strings.Cut(line, " ")
 		if len(oid) != 64 {
