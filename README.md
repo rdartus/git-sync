@@ -372,8 +372,11 @@ OPTIONS
             fetched, the sync fails and the previously published revision is
             kept.  Credentials supplied via --username/--password or
             --credential are passed to git, so they also apply to an LFS
-            endpoint on the same host as the repo.  If not specified, this
-            defaults to false.
+            endpoint on the same host as the repo.  Each worktree has its own
+            LFS object store, which is removed along with the worktree (see
+            --stale-worktree-timeout), so LFS objects do not accumulate.
+            Objects that did not change since the previous revision are not
+            downloaded again.  If not specified, this defaults to false.
 
     --github-base-url <string>, $GITSYNC_GITHUB_BASE_URL
             The GitHub base URL to use in GitHub requests when GitHub app

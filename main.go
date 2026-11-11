@@ -1442,6 +1442,14 @@ func (git *repoSync) initRepo(ctx context.Context) error {
 		}
 	}
 
+	if git.gitLFS {
+		// Each worktree gets its own LFS object store (see
+		// setupWorktreeLFS), which is configured per-worktree.
+		if _, _, err := git.Run(ctx, git.root, "config", "extensions.worktreeConfig", "true"); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1690,9 +1698,97 @@ func (git *repoSync) createWorktree(ctx context.Context, hash string) (worktree,
 	return worktree, nil
 }
 
+// lfsStorage returns the directory in which git-lfs keeps the objects for the
+// given worktree.  It lives in the worktree's private git directory, so it is
+// deleted by `git worktree prune` together with the rest of that directory,
+// which is what removing a stale worktree does.
+func (git *repoSync) lfsStorage(worktree worktree) absPath {
+	return git.root.Join(".git", "worktrees", worktree.Hash(), "lfs")
+}
+
+// setupWorktreeLFS gives the worktree its own git-lfs object store.
+//
+// By default git-lfs has one store for the whole repo, and it never deletes
+// anything from it (short of an explicit `git lfs prune`).  Since git-sync
+// creates a new worktree for every new commit, that would accumulate the LFS
+// objects of every commit ever synced, even though the old worktrees are
+// removed.  Giving each worktree its own store ties the lifetime of the
+// objects to the lifetime of the worktree, so no separate cleanup is needed.
+//
+// To avoid downloading everything again for every commit, the new store is
+// seeded with the objects of the previous worktree which are also needed by
+// the new one.
+func (git *repoSync) setupWorktreeLFS(ctx context.Context, worktree worktree, previous worktree) error {
+	storage := git.lfsStorage(worktree)
+	git.log.V(1).Info("configuring worktree git-lfs storage", "path", storage)
+	if _, _, err := git.Run(ctx, worktree.Path(), "config", "--worktree", "lfs.storage", storage.String()); err != nil {
+		return err
+	}
+
+	if previous == "" || previous.Hash() == worktree.Hash() {
+		return nil
+	}
+	// Seeding is only an optimization, so a failure is not fatal: git-lfs
+	// downloads whatever is missing.
+	if err := git.seedLFSObjects(ctx, worktree, previous); err != nil {
+		git.log.Error(err, "can't reuse git-lfs objects from the previous worktree, they will be downloaded",
+			"previous", previous.Hash(), "hash", worktree.Hash())
+	}
+	return nil
+}
+
+// seedLFSObjects hard-links into the LFS store of the worktree those objects
+// that the worktree's commit refers to and which are already in the store of
+// the previous worktree.  Objects are immutable and named after the hash of
+// their content, so sharing them is safe, and deleting one worktree does not
+// affect the other.
+func (git *repoSync) seedLFSObjects(ctx context.Context, worktree worktree, previous worktree) error {
+	srcObjects := git.lfsStorage(previous).Join("objects")
+	if _, err := os.Stat(srcObjects.String()); err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to reuse
+		}
+		return err
+	}
+	dstObjects := git.lfsStorage(worktree).Join("objects")
+
+	// This does not need a checkout, it reads the pointer files from the commit.
+	stdout, _, err := git.Run(ctx, worktree.Path(), "lfs", "ls-files", "--long", worktree.Hash())
+	if err != nil {
+		return err
+	}
+
+	linked := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		// Lines look like "<oid> [*-] <path>", where the oid is a sha256.
+		oid, _, _ := strings.Cut(line, " ")
+		if len(oid) != 64 {
+			continue
+		}
+		// This is how git-lfs lays out its store.
+		rel := filepath.Join(oid[0:2], oid[2:4], oid)
+		src := srcObjects.Join(rel).String()
+		dst := dstObjects.Join(rel).String()
+		if _, err := os.Stat(src); err != nil {
+			continue // not downloaded, or not needed by the previous worktree
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), defaultDirMode); err != nil {
+			return err
+		}
+		if err := os.Link(src, dst); err != nil && !os.IsExist(err) {
+			return err
+		}
+		linked++
+	}
+	git.log.V(1).Info("reused git-lfs objects from the previous worktree", "count", linked, "previous", previous.Hash())
+	return nil
+}
+
 // configureWorktree applies some configuration (e.g. sparse checkout) to
 // the specified worktree and checks out the specified hash and submodules.
-func (git *repoSync) configureWorktree(ctx context.Context, worktree worktree) error {
+// previous is the worktree that is currently published (or empty), which is
+// used to avoid downloading git-lfs objects that it already has.
+func (git *repoSync) configureWorktree(ctx context.Context, worktree worktree, previous worktree) error {
 	hash := worktree.Hash()
 
 	// The .git file in the worktree directory holds a reference to
@@ -1748,6 +1844,14 @@ func (git *repoSync) configureWorktree(ctx context.Context, worktree worktree) e
 
 		args := []string{"sparse-checkout", "init"}
 		if _, _, err = git.Run(ctx, worktree.Path(), args...); err != nil {
+			return err
+		}
+	}
+
+	// This must happen before the checkout below, which is what downloads the
+	// LFS objects.
+	if git.gitLFS {
+		if err := git.setupWorktreeLFS(ctx, worktree, previous); err != nil {
 			return err
 		}
 	}
@@ -1968,7 +2072,7 @@ func (git *repoSync) SyncRepo(ctx context.Context, syncHooks syncHooks) (bool, s
 		// Even if this worktree existed and passes sanity, it might not have all
 		// the correct settings (e.g. sparse checkout).  The best way to get
 		// it all set is just to re-run the configuration,
-		if err := git.configureWorktree(ctx, newWorktree); err != nil {
+		if err := git.configureWorktree(ctx, newWorktree, currentWorktree); err != nil {
 			return false, "", err
 		}
 
@@ -2787,8 +2891,11 @@ OPTIONS
             fetched, the sync fails and the previously published revision is
             kept.  Credentials supplied via --username/--password or
             --credential are passed to git, so they also apply to an LFS
-            endpoint on the same host as the repo.  If not specified, this
-            defaults to false.
+            endpoint on the same host as the repo.  Each worktree has its own
+            LFS object store, which is removed along with the worktree (see
+            --stale-worktree-timeout), so LFS objects do not accumulate.
+            Objects that did not change since the previous revision are not
+            downloaded again.  If not specified, this defaults to false.
 
     --github-base-url <string>, $GITSYNC_GITHUB_BASE_URL
             The GitHub base URL to use in GitHub requests when GitHub app

@@ -30,6 +30,33 @@ jobs:
         run: |
           make all-build
 
+  # The `test` job below already runs every e2e test, including these.  This job
+  # runs only the git-lfs ones, for a quick answer on changes to LFS handling.
+  e2e-lfs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10'
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: git-sync
+
+      # The e2e tests use git-lfs on the host to upload objects to the test
+      # LFS server (it is preinstalled on GitHub's ubuntu runners).
+      - name: git-lfs version
+        run: |
+          git lfs version
+
+      - name: e2e git-lfs tests
+        working-directory: git-sync
+        env:
+          SKIP_GITHUB_APP_TEST: true
+        run: |
+          ./test_e2e.sh git_lfs
+
   test:
     runs-on: ubuntu-latest
     steps:
